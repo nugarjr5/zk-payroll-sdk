@@ -232,3 +232,55 @@ export function isPayrollStateConsistent(
     throw error;
   }
 }
+/**
+ * Validates a requested payroll period status transition.
+ *
+ * Allowed lifecycle transitions:
+ * draft -> locked
+ * draft -> cancelled
+ * locked -> settled
+ *
+ * settled and cancelled are terminal states.
+ */
+export function assertPayrollPeriodTransition(
+  currentStatus: PayrollPeriodStatus | string,
+  targetStatus: PayrollPeriodStatus | string,
+  context: StateConsistencyErrorContext = {}
+): void {
+  const current = normalizeStatus(currentStatus);
+  const target = normalizeStatus(targetStatus);
+
+  if (!current || !target) {
+    throw new StateConsistencyError(
+      "Both current and target payroll period statuses are required.",
+      StateConsistencyErrorCode.INVALID_INPUT,
+      context,
+      "Provide valid payroll period statuses before requesting a transition."
+    );
+  }
+
+  const terminalStatuses = new Set(["SETTLED", "CANCELLED"]);
+
+  if (terminalStatuses.has(current)) {
+    throw new StateConsistencyError(
+      `Payroll period is already in terminal state "${current}".`,
+      StateConsistencyErrorCode.TERMINAL_STATE,
+      { ...context, localStatus: current, onchainStatus: target },
+      "Do not request another transition for a settled or cancelled payroll period."
+    );
+  }
+
+  const allowedTransitions: Record<string, readonly string[]> = {
+    DRAFT: ["LOCKED", "CANCELLED"],
+    LOCKED: ["SETTLED"],
+  };
+
+  if (!allowedTransitions[current]?.includes(target)) {
+    throw new StateConsistencyError(
+      `Invalid payroll period transition from "${current}" to "${target}".`,
+      StateConsistencyErrorCode.INVALID_TRANSITION,
+      { ...context, localStatus: current, onchainStatus: target },
+      "Refresh the current payroll period state and request only a supported lifecycle transition."
+    );
+  }
+}
