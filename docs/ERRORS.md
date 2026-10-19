@@ -16,7 +16,11 @@ All SDK errors inherit from the base `ZKPayrollError` class.
   - `ProofGenerationError` - Failures related to circuit artifact downloading, caching, or witness calculation.
   - `SerializationError` - Failures during importing or exporting of payroll drafts.
   - `ValidationError` - Client-side validation errors.
+- `PayoutScheduleCollisionError` - Payout schedule collisions, minimum interval violations, or duplicate schedule identifiers.
   - `PayrollStateConsistencyError` - Payroll state transitions that violate the expected lifecycle or contain inconsistent data.
+  - `PayrollCalendarOverlapError` - Payroll calendar cycles that overlap, contain collisions, or define inverted date ranges.
+  - `PaymentInstructionDuplicateError` - Payment instructions that duplicate an existing instruction in the same payroll batch.
+  - `TreasuryReserveReleaseError` - Treasury reserve release validation failures (missing reserve, insufficient balance, invalid release amount, or disallowed state transition).
 
 *(Note: `PayrollError` is deprecated and acts as a backward-compatibility alias for `ZKPayrollError`)*
 
@@ -30,7 +34,7 @@ Every `ZKPayrollError` exposes:
 
 ### Error Code Registry
 
-The SDK maintains a centralized registry (`ERROR_CODE_REGISTRY`) that maps every stable error code to its category, meaning, whether it is retryable, and a suggested user-facing message. Integrators can use the registry programmatically:
+The SGK maintains a centralized registry (`ERROR_CODE_REGISTRY`) that maps every stable error code to its category, meaning, whether it is retryable, and a suggested user-facing message. Integrators can use the registry programmatically:
 
 ```typescript
 import { ERROR_CODE_REGISTRY, isRetryableErrorCode, getErrorCategory } from "@zk-payroll/core";
@@ -50,6 +54,8 @@ if (isRetryableErrorCode(error.code)) {
 | Code | Category | Meaning | Retryable | Suggested User Message |
 |---|---|---|---|---|
 | `VALIDATION_ERROR` | validation | Input validation failed. | No | The provided parameters failed validation. Please review your inputs and try again. |
+| `PAYOUT_SCHEDULE_COLLISION` | validation | Payout schedule collision or interval violation detected. | No | One or more scheduled payouts collide. Review conflicting execution times and intervals. |
+| `PAYMENT_INSTRUCTION_DUPLICATE` | validation | Payment instruction duplicates an existing instruction in the same payroll batch. | No | A payment instruction duplicates an existing instruction. Review the duplicated instruction and try again. |
 | `WALLET_NOT_INSTALLED` | wallet | Wallet extension is not installed. | No | The wallet extension is not installed. Please install it and try again. |
 | `WALLET_NOT_CONNECTED` | wallet | Wallet is installed but not connected to the dApp. | Yes | The wallet is not connected. Please connect your wallet and try again. |
 | `WALLET_CONNECTION_REJECTED` | wallet | User explicitly rejected the connection request. | Yes | The wallet connection request was rejected. Please approve the connection in your wallet and try again. |
@@ -80,6 +86,12 @@ if (isRetryableErrorCode(error.code)) {
 | `PAYROLL_STATE_CONSISTENCY_VIOLATION` | payroll | Payroll state transition violates the expected lifecycle. | No | The payroll is in an invalid state for this operation. Refresh the payroll and try again. |
 | `PAYROLL_STATE_STALE_DATA` | payroll | Payroll state data is out of date or inconsistent. | Yes | The payroll data is out of date. Refresh the payroll and try again. |
 | `PAYROLL_STATE_INVALID_TRANSITION` | payroll | Requested payroll state transition is not allowed. | No | This payroll operation is not allowed in the current state. Please review the payroll status. |
+| `PAYROLL_CALENDAR_OVERLAP` | payroll | Payroll calendar cycles overlap or contain conflicting date intervals. | No | Payroll calendar cycles overlap or contain conflicting date intervals. Please review your period dates and try again. |
+| `TREASURY_RESERVE_NOT_FOUND` | treasury | No treasury reserve exists for the requested payroll cycle. | No | No treasury reserve was found for this payroll cycle. Please create a reserve before releasing funds. |
+| `TREASURY_RESERVE_INSUFFICIENT_BALANCE` | treasury | Treasury reserve balance is lower than the requested release amount. | No | The treasury reserve does not hold enough funds for this release. Please fund the reserve and try again. |
+| `TREASURY_RESERVE_INVALID_AMOUNT` | treasury | Release amount is zero, negative, or not a valid integer. | No | The release amount is invalid. Please provide a positive amount and try again. |
+| `TREASURY_RESERVE_INVALID_STATE` | treasury | Treasury reserve is in a state that disallows release. | No | The treasury reserve is not ready for release. Please review the reserve status and try again. |
+| `TREASURY_RESERVE_ALREADY_RELEASED` | treasury | Treasury reserve for this cycle has already been released. | No | This treasury reserve has already been released. Refresh the payroll to view the current status. |
 
 ### Retry Guidance
 
@@ -88,7 +100,7 @@ if (isRetryableErrorCode(error.code)) {
 
 ## User-Friendly UI Mapping
 
-Use `toUserFriendlyError(error)` to map any SDK or unknown error into a clean, human-readable format suitable for UI toasts and diagnostic logs:
+Use `toUserFriendlyError(error)` to map any SGK or unknown error into a clean, human-readable format suitable for UI toasts and diagnostic logs:
 
 ```typescript
 import { toUserFriendlyError } from "@zk-payroll/sdk";
@@ -112,7 +124,7 @@ Contract errors are mapped intelligently from the Soroban RPC responses. You sho
 import { ContractExecutionError, ContractErrorCode } from "@zk-payroll/sdk";
 
 try {
-  await sdk.processPayment("G...", 100n);
+  await sdk.processPayment("G...", 100n");
 } catch (error) {
   if (error instanceof ContractExecutionError) {
     switch (error.code) {
@@ -153,100 +165,6 @@ try {
       showToast("Transaction signing was canceled by the user.");
     } else if (error.code === WalletErrorCode.NETWORK_MISMATCH) {
       // Recovery: Ask the user to switch networks in their wallet extension.
-      showWarning("Please switch your wallet to the Testnet network.");
-    } else {
-      console.error(`Wallet Error [${error.code}]:`, error.message);
-    }
-  }
-}
-```
-
 ### 3. Handling Zero-Knowledge Proof Failures (`ProofGenerationError`)
 
 Proof generation is computationally heavy and relies on downloaded circuit artifacts.
-
-```typescript
-import { ProofGenerationError } from "@zk-payroll/sdk";
-
-try {
-  const proof = await generator.generateProof(witness);
-} catch (error) {
-  if (error instanceof ProofGenerationError) {
-    // Recovery: Proof generation failed. This could be due to a malformed witness, 
-    // or an inability to download the .wasm/.zkey artifacts.
-    // Ensure `config.wasmUrl` and `config.zkeyUrl` are reachable.
-    console.error("ZK Proof generation failed:", error.message);
-  }
-}
-```
-
-### 4. Handling Draft Serialization Issues (`SerializationError`)
-
-When importing exported drafts, the data might be corrupted, tampered with, or from an incompatible version.
-
-```typescript
-import { importDraft, SerializationError } from "@zk-payroll/sdk";
-
-try {
-  const { draft, warnings } = importDraft(rawData, expectedChecksum);
-  if (warnings.length > 0) {
-    console.warn("Draft imported with warnings:", warnings);
-  }
-} catch (error) {
-  if (error instanceof SerializationError) {
-    if (error.code === "CHECKSUM_MISMATCH") {
-      // Recovery: Do not trust the payload. Abort the import.
-      alert("The draft file is corrupted or tampered with. Import aborted.");
-    } else {
-      console.error("Draft import failed:", error.message);
-    }
-  }
-}
-```
-
-### 5. Handling Payroll State Consistency Errors (`PayrollStateConsistencyError`)
-
-The SDK guards payroll state transitions and data integrity. When an operation would move a payroll into an invalid state, or when the local state is out of date with the chain, the SDK throws a `PayrollStateConsistencyError`.
-
-```typescript
-import { PayrollStateConsistencyError, PayrollStateConsistencyErrorCode } from "@zk-payroll/sdk";
-
-try {
-  await sdk.approvePayroll(payrollId);
-} catch (error) {
-  if (error instanceof PayrollStateConsistencyError) {
-    switch (error.code) {
-      case PayrollStateConsistencyErrorCode.STATE_VIOLATION:
-        // Recovery: The payroll is not in a state that allows approval.
-        // Refresh the payroll and re-evaluate the available actions.
-        console.error("Payroll cannot be approved in its current state:", error.context.currentState);
-        break;
-      case PayrollStateConsistencyErrorCode.STALE_DATA:
-        // Recovery: Re-fetch the latest payroll state before retrying.
-        console.error("Payroll state is stale. Refreshing...");
-        await sdk.refreshPayroll(payrollId);
-        break;
-      case PayrollStateConsistencyErrorCode.INVALID_TRANSITION:
-        // Recovery: The requested transition is not allowed from the current state.
-        console.error("Invalid payroll transition:", error.message);
-        break;
-    }
-  }
-}
-```
-
-### Payroll State Lifecycle
-
-The SDK enforces the following state lifecycle for a payroll:
-
-```text
-draft --> pending_approval --> approved --> executing --> completed
-                                                     \
-                                                      --> failed
-                                                      \
-                                                       --> cancelled
-```
-
-Each transition is validated by the SDK. Attempting an invalid transition (for example, executing a payroll that has not been approved) throws a `PayrollStateConsistencyError` with code `PAYROLL_STATE_INVALID_TRANSITION`.
-
-The consistency guard also detects stale or inconsistent local state by comparing the local payroll snapshot against the on-chain record. When a divergence is detected, a `PayrollStateConsistencyError` with code `PAYROLL_STATE_STALE_DATA` is thrown, signalling that the caller should refresh before retrying.

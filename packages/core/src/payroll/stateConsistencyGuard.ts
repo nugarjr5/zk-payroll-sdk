@@ -7,11 +7,17 @@
  * stale clients, and race conditions from corrupting payroll execution.
  */
 
-import type { PayrollPeriodStatus } from "./types";
+import type { PayrollStatus as PayrollPeriodStatus } from "./types";
 
 export enum StateConsistencyErrorCode {
   /** The locally tracked status does not match the on-chain status. */
   STATUS_MISMATCH = "STATUS_MISMATCH",
+    /** The requested payroll period status transition is not allowed. */
+  INVALID_TRANSITION = "INVALID_TRANSITION",
+  /** The payroll period is already in a terminal state. */
+  TERMINAL_STATE = "TERMINAL_STATE",
+  /** The locally tracked version is ahead of the on-chain version without permission. */
+  STATE_MISMATCH = "STATE_MISMATCH",
   /** The locally tracked version is behind the on-chain version. */
   STALE_CLIENT = "STALE_CLIENT",
   /** The period identifiers do not refer to the same period. */
@@ -110,7 +116,7 @@ export function assertPayrollStateConsistent(
   local: LocalPayrollState,
   onchain: OnChainPayrollState,
   options: StateConsistencyGuardOptions = {}
-  ): void {
+): void {
   const { allowLocalAwead = false, tolerateMissingVersion = true } = options;
   const baseContext: StateConsistencyErrorContext = { ...options.context };
 
@@ -166,16 +172,18 @@ export function assertPayrollStateConsistent(
   }
 
   if (localStatus !== onchainStatus) {
-    throw new StateConsistencyError(
-      `Payroll state mismatch for period "${localPeriodId}": local "${localStatus}" vs on-chain "${onchainStatus}".`,
-      StateConsistencyErrorCode.STATUS_MISMATCH,
-      { ...baseContext, localStatus, onchainStatus, localPeriodId, onchainPeriodId },
-      "Refresh the local payroll state from the chain and retry the operation."
-    );
-  }
-
-  const localVersion = typeof local.version === "number" ? local.version : tolerateMissingVersion ? 0 : undefined;
-  const onchainVersion = typeof onchain.version === "number" ? onchain.version : tolerateMissingVersion ? 0 : undefined;
+  throw new StateConsistencyError(
+    `Payroll state mismatch for period "${localPeriodId}": local "${localStatus}" vs on-chain "${onchainStatus}".`,
+    StateConsistencyErrorCode.STATUS_MISMATCH,
+    { ...baseContext, localStatus, onchainStatus, localPeriodId, onchainPeriodId },
+    "Refresh the local payroll state from the chain and retry the operation."
+  );
+}
+  
+  const localVersion =
+    typeof local.version === "number" ? local.version : tolerateMissingVersion ? 0 : undefined;
+  const onchainVersion =
+    typeof onchain.version === "number" ? onchain.version : tolerateMissingVersion ? 0 : undefined;
 
   if (localVersion === undefined || onchainVersion === undefined) {
     throw new StateConsistencyError(
@@ -222,5 +230,57 @@ export function isPayrollStateConsistent(
       return false;
     }
     throw error;
+  }
+}
+/**
+ * Validates a requested payroll period status transition.
+ *
+ * Allowed lifecycle transitions:
+ * draft -> locked
+ * draft -> cancelled
+ * locked -> settled
+ *
+ * settled and cancelled are terminal states.
+ */
+export function assertPayrollPeriodTransition(
+  currentStatus: PayrollPeriodStatus | string,
+  targetStatus: PayrollPeriodStatus | string,
+  context: StateConsistencyErrorContext = {}
+): void {
+  const current = normalizeStatus(currentStatus);
+  const target = normalizeStatus(targetStatus);
+
+  if (!current || !target) {
+    throw new StateConsistencyError(
+      "Both current and target payroll period statuses are required.",
+      StateConsistencyErrorCode.INVALID_INPUT,
+      context,
+      "Provide valid payroll period statuses before requesting a transition."
+    );
+  }
+
+  const terminalStatuses = new Set(["SETTLED", "CANCELLED"]);
+
+  if (terminalStatuses.has(current)) {
+    throw new StateConsistencyError(
+      `Payroll period is already in terminal state "${current}".`,
+      StateConsistencyErrorCode.TERMINAL_STATE,
+      { ...context, localStatus: current, onchainStatus: target },
+      "Do not request another transition for a settled or cancelled payroll period."
+    );
+  }
+
+  const allowedTransitions: Record<string, readonly string[]> = {
+    DRAFT: ["LOCKED", "CANCELLED"],
+    LOCKED: ["SETTLED"],
+  };
+
+  if (!allowedTransitions[current]?.includes(target)) {
+    throw new StateConsistencyError(
+      `Invalid payroll period transition from "${current}" to "${target}".`,
+      StateConsistencyErrorCode.INVALID_TRANSITION,
+      { ...context, localStatus: current, onchainStatus: target },
+      "Refresh the current payroll period state and request only a supported lifecycle transition."
+    );
   }
 }
