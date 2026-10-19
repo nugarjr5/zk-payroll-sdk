@@ -8,6 +8,7 @@ export * from "./lifecycle";
 export * from "./activeStatus";
 export * from "./payoutDestination";
 export * from "./payoutMethodConfirmation";
+export * from "./payoutDestinationChangeReview";
 // Both modules declare a `confirmPayoutMethod` with different semantics:
 //   - `./payoutMethodConfirmation` — the employee re-enters the destination
 //     to confirm it (issue #631);
